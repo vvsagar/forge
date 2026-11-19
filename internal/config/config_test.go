@@ -179,10 +179,11 @@ func TestLoadFileIgnoresUserOnlySettingsForProjectConfig(t *testing.T) {
 type = gitea
 scheme = http
 ssh_host = ssh.legit.test
+proxy = socks5://attacker.example:1080
 `), 0600)
 
 	cfg := &Config{Domains: map[string]DomainSection{
-		"attacker.com": {Scheme: "https"},
+		"attacker.com": {Scheme: "https", Proxy: "http://127.0.0.1:3128"},
 	}}
 	if err := loadFile(cfg, path, false); err != nil {
 		t.Fatal(err)
@@ -195,12 +196,71 @@ ssh_host = ssh.legit.test
 	if got := cfg.Domains["attacker.com"].Scheme; got != "https" {
 		t.Errorf("project config should not override Scheme, got %q", got)
 	}
+	if got := cfg.Domains["attacker.com"].Proxy; got != "http://127.0.0.1:3128" {
+		t.Errorf("project config should not override Proxy, got %q", got)
+	}
 
 	if cfg.Domains["attacker.com"].Type != "gitea" {
 		t.Error("type should still be set from project config")
 	}
 	if got := cfg.Domains["attacker.com"].UserType; got != "" {
 		t.Errorf("project config should not set UserType, got %q", got)
+	}
+}
+
+func TestLoadFileProxy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	_ = os.WriteFile(path, []byte(`[github.com]
+proxy = SOCKS5H://user:pass@127.0.0.1:1080
+
+[gitea.example.com]
+proxy = 127.0.0.1:8080
+
+[gitlab.example.com]
+proxy =
+`), 0600)
+
+	cfg := &Config{Domains: make(map[string]DomainSection)}
+	if err := loadFile(cfg, path, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := cfg.Domains["github.com"].Proxy, "socks5h://user:pass@127.0.0.1:1080"; got != want {
+		t.Errorf("expected normalized proxy %q, got %q", want, got)
+	}
+	if got, want := cfg.Domains["gitea.example.com"].Proxy, "http://127.0.0.1:8080"; got != want {
+		t.Errorf("expected bare host:port to default to http, got %q", got)
+	}
+	if got := cfg.Domains["gitlab.example.com"].Proxy; got != "" {
+		t.Errorf("expected empty proxy, got %q", got)
+	}
+}
+
+func TestLoadFileInvalidProxy(t *testing.T) {
+	tests := []struct {
+		name  string
+		proxy string
+	}{
+		{"unsupported scheme", "ftp://127.0.0.1:21"},
+		{"missing host", "http://"},
+		{"malformed", "http://[::1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config")
+			_ = os.WriteFile(path, []byte("[github.com]\nproxy = "+tt.proxy+"\n"), 0600)
+
+			cfg := &Config{Domains: make(map[string]DomainSection)}
+			err := loadFile(cfg, path, true)
+			if err == nil {
+				t.Fatal("expected error for invalid proxy")
+			}
+			if !strings.Contains(err.Error(), "invalid proxy") {
+				t.Errorf("expected invalid proxy error, got %v", err)
+			}
+		})
 	}
 }
 

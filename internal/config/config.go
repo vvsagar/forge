@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +40,7 @@ type DomainSection struct {
 	TokenExec   string // non-empty when token is retrieved via a shell command (from "token-cmd" config key)
 	SSHHost     string // alternate host for git-over-ssh; the section name remains the API host
 	GitProtocol string // https or ssh; overrides default
+	Proxy       string // proxy URL for this host's API requests; only from user config
 }
 
 // ResolveToken returns the token for this domain. If TokenExec is set, it
@@ -118,6 +120,33 @@ func parseGitProtocol(v string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid git_protocol %q: must be \"https\" or \"ssh\"", v)
 	}
+}
+
+// parseProxy validates a proxy URL and returns it in canonical form. A value
+// without a scheme is treated as an HTTP proxy, matching the convention used
+// by HTTP_PROXY and friends.
+func parseProxy(v string) (string, error) {
+	raw := strings.TrimSpace(v)
+	if raw == "" {
+		return "", nil
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid proxy %q: %w", v, err)
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", fmt.Errorf("invalid proxy %q: scheme must be http, https, socks5 or socks5h", v)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("invalid proxy %q: missing host", v)
+	}
+	return u.String(), nil
 }
 
 // execValue runs cmd via the platform shell (sh -c on Unix, %COMSPEC% /c on
@@ -248,6 +277,13 @@ func loadFile(cfg *Config, path string, userConfig bool) error {
 		if userConfig {
 			if v, ok := kv["ssh_host"]; ok {
 				ds.SSHHost = v
+			}
+			if v, ok := kv["proxy"]; ok {
+				p, err := parseProxy(v)
+				if err != nil {
+					return fmt.Errorf("%s: [%s] %w", path, name, err)
+				}
+				ds.Proxy = p
 			}
 		}
 		if userConfig {

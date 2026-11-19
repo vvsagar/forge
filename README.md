@@ -147,6 +147,24 @@ scheme = http
 
 Committed `.forge` files cannot set the API scheme.
 
+### Per-host proxy
+
+Set `proxy` in a host's section to send that host's API requests through a proxy:
+
+```ini
+[github.com]
+token = ghp_abc123
+proxy = socks5h://127.0.0.1:1080
+
+[gitlab.internal.example.com]
+token = abc123
+proxy = http://proxy.internal:3128
+```
+
+Supported schemes are `http`, `https`, `socks5` and `socks5h`. A value without a scheme, such as `127.0.0.1:8080`, is treated as an HTTP proxy. Use `socks5h` when the proxy should resolve the target hostname, which is needed for hosts only the proxy can look up.
+
+A configured proxy takes precedence over `HTTP_PROXY`/`HTTPS_PROXY` for that host, and `NO_PROXY` does not bypass it. Hosts without a `proxy` setting keep using the environment variables. Proxy settings are only read from `~/.config/forge/config`; committed `.forge` files cannot set one, so a repository can't redirect API traffic. This covers forge's own API requests — commands that run `git` use git's proxy configuration instead.
+
 Precedence from highest to lowest: CLI flags, environment variables, `.forge`, `~/.config/forge/config`, built-in defaults.
 
 ### Read-only mode

@@ -6,12 +6,30 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/git-pkgs/forge/internal/config"
 )
+
+// writeUserConfig points config.Load at a temporary user config containing
+// content and clears the cached config before and after the test.
+func writeUserConfig(t *testing.T, content string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "forge"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "forge", "config"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	config.ResetCache()
+	t.Cleanup(config.ResetCache)
+}
 
 func TestHTTPClientSetsUserAgent(t *testing.T) {
 	var got string
@@ -32,6 +50,96 @@ func TestHTTPClientSetsUserAgent(t *testing.T) {
 	}
 	if got == "" {
 		t.Error("User-Agent was empty")
+	}
+}
+
+func TestHTTPClientUsesConfiguredProxyPerHost(t *testing.T) {
+	var mu sync.Mutex
+	var proxied []string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		proxied = append(proxied, r.Host)
+		mu.Unlock()
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+
+	writeUserConfig(t, fmt.Sprintf("[proxied.test]\nproxy = %s\n", proxy.URL))
+
+	c := HTTPClient()
+
+	// The configured host goes through the proxy, which answers without
+	// forwarding, so this also works without DNS for proxied.test.
+	resp, err := c.Get("http://proxied.test/resource")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected response from proxy, got status %d", resp.StatusCode)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), proxied...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "proxied.test" {
+		t.Errorf("expected one request for proxied.test through the proxy, got %v", got)
+	}
+
+	// Hosts without a proxy setting keep going direct.
+	var directHits int
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		directHits++
+	}))
+	defer direct.Close()
+	resp, err = c.Get(direct.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if directHits != 1 {
+		t.Errorf("expected direct request for unconfigured host, got %d hits", directHits)
+	}
+	mu.Lock()
+	n := len(proxied)
+	mu.Unlock()
+	if n != 1 {
+		t.Errorf("unconfigured host used the proxy: %d requests", n)
+	}
+}
+
+func TestHTTPClientProxyMatchesHostWithPort(t *testing.T) {
+	var mu sync.Mutex
+	var proxied []string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		proxied = append(proxied, r.Host)
+		mu.Unlock()
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer target.Close()
+	hostPort := strings.TrimPrefix(target.URL, "http://")
+
+	writeUserConfig(t, fmt.Sprintf("[%s]\nproxy = %s\n", hostPort, proxy.URL))
+
+	c := HTTPClient()
+	resp, err := c.Get(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected response from proxy, got status %d", resp.StatusCode)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), proxied...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != hostPort {
+		t.Errorf("expected request for %s through the proxy, got %v", hostPort, got)
 	}
 }
 

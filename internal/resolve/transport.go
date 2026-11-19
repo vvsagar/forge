@@ -4,8 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/git-pkgs/forge"
+	"github.com/git-pkgs/forge/internal/config"
 )
 
 // maxRedirects matches the limit net/http applies when CheckRedirect is nil.
@@ -40,13 +43,62 @@ func ReadOnly() bool {
 // client only sends GET, HEAD and OPTIONS requests.
 func HTTPClient() *http.Client {
 	hc := &http.Client{
-		Transport:     &userAgentTransport{base: http.DefaultTransport},
+		Transport:     &userAgentTransport{base: baseTransport()},
 		CheckRedirect: checkRedirect,
 	}
 	if readOnly {
 		return forges.ReadOnlyHTTPClient(hc)
 	}
 	return hc
+}
+
+// baseTransport clones http.DefaultTransport, keeping its timeouts and TLS
+// settings, and replaces its proxy policy. One transport is returned per
+// client, so all forge backends and host detection on that client share a
+// connection pool.
+func baseTransport() http.RoundTripper {
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return &http.Transport{Proxy: proxyForRequest}
+	}
+	t = t.Clone()
+	t.Proxy = proxyForRequest
+	return t
+}
+
+// proxyForRequest picks the proxy for a request. A proxy configured for the
+// request's host in the user config wins; otherwise the standard HTTP_PROXY,
+// HTTPS_PROXY and NO_PROXY environment variables apply.
+func proxyForRequest(req *http.Request) (*url.URL, error) {
+	if u := configuredProxy(req.URL); u != nil {
+		return u, nil
+	}
+	return http.ProxyFromEnvironment(req)
+}
+
+// configuredProxy returns the proxy URL configured for a request's host, or
+// nil when the host has no proxy setting. Section names may include a port, so
+// the host is matched both with and without it.
+func configuredProxy(u *url.URL) *url.URL {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return nil
+	}
+	host := strings.ToLower(u.Host)
+	ds, ok := cfg.Domains[host]
+	if !ok {
+		if name := strings.ToLower(u.Hostname()); name != host {
+			ds, ok = cfg.Domains[name]
+		}
+	}
+	if !ok || ds.Proxy == "" {
+		return nil
+	}
+	proxy, err := url.Parse(ds.Proxy)
+	if err != nil {
+		return nil
+	}
+	return proxy
 }
 
 // errInsecureRedirect is returned when a redirect would downgrade from
